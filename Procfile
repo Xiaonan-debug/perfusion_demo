@@ -1,1 +1,1 @@
-web: gunicorn --worker-class eventlet -w 1 --bind 0.0.0.0:$PORT online_perfusion_chatbot:app
+web: gunicorn --worker-class eventlet -w 1 --bind 0.0.0.0:$PORT --timeout 120 online_perfusion_chatbot:app
