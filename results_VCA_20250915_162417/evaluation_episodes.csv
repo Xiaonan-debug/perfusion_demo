@@ -1,3 +1,0 @@
-episode,total_reward,steps,final_hour,success,final_temperature,final_pH,final_glucose
-1,-10457.505882352942,24,24.0,True,37.0,7.52,18.77
-2,-10471.505882352942,24,24.0,True,31.8,7.47,15.78
