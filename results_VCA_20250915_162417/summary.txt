@@ -1,0 +1,10 @@
+DQN Training Summary - VCA Scenario
+==================================================
+
+Training Episodes: 5
+Evaluation Episodes: 2
+Final Epsilon: 0.975249
+Success Rate: 100.00%
+Average Reward: -9440.76
+Average Steps: 24.0
+Results Directory: results_VCA_20250915_162417

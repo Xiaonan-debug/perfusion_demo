@@ -1,0 +1,23 @@
+======================================================================
+Trajectory Comparison Summary - EYE Scenario
+======================================================================
+
+RANDOM ACTIONS:
+  Hours survived: 1
+  Out of bounds: True
+  Failure hour: 1
+  Failure parameter: 7
+  Failure value: 1.00
+
+DQN AGENT:
+  Hours survived: 1
+  Out of bounds: True
+  Failure hour: 1
+  Failure parameter: 7
+  Failure value: 1.00
+
+COMPARISON:
+  DQN improvement: +0.0 hours
+  Percentage improvement: +0.0%
+
+======================================================================

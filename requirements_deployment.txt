@@ -1,0 +1,14 @@
+# Production requirements for online deployment
+Flask==2.3.3
+Flask-SocketIO==5.3.6
+python-socketio==5.8.0
+python-engineio==4.7.1
+eventlet==0.33.3
+gunicorn==21.2.0
+numpy>=1.21.0
+torch>=1.9.0
+matplotlib>=3.5.0
+Pillow>=8.0.0
+scipy>=1.7.0
+scikit-learn>=1.0.0
+gym>=0.21.0
