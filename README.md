@@ -108,8 +108,8 @@ Agent 工作流:
 
 ### 4.6 ASP 训练环境设计（SoMe）
 
-与 ALFWorld（物理操作）和 Mind2Web（网页交互）不同，SoMe 的核心能力是
-**工具链规划 + 信息检索**——agent 不改变世界状态，而是通过调用工具从只读数据库中
+SoMe 的核心能力是
+**工具链规划 + 信息检索**, agent 不改变世界状态，而是通过调用工具从只读数据库中
 提取信息，最终提交答案。
 
 #### 4.6.1 World State（隐藏状态）
@@ -162,8 +162,7 @@ agent 看不到 `ground_truth`、`oracle_tool_chain`、也无法直接读取 `da
 | `data_folder` | `{folder_name, start_idx, end_idx}` | 分页读取临时数据 |
 | `submit_answer` | `{answer}` | 提交最终答案，结束 episode |
 
-参数缺失 → 返回错误提示 + 负奖励；对只读数据库执行查询，**不修改 world_state**
-（与 ALFWorld 的状态可变、Mind2Web 的表单可写形成对比）。
+对只读数据库执行查询
 
 #### 4.6.4 Transition Engine
 
@@ -174,18 +173,12 @@ agent 发出 Action(tool_name, params)
   → 若 tool_name == "submit_answer"：与 ground_truth 比对，episode 结束
 ```
 
-核心特征：
-- **只读**：工具执行不修改数据库，只产生查询结果
-- **确定性**：相同参数 → 相同结果（无随机性）
-- **中间存储**：`post_search` 等工具会将结果存入 `data_folders`，
-  后续 `topic_clustering` / `data_folder` 可引用
-
 与其他 benchmark 的对比：
 - ALFWorld：`take apple` → `apple.location = inventory`（状态可变）
 - Mind2Web：`TYPE "Boston"` → `form_values["destination"] = "Boston"`（状态可变）
 - SoMe：`user_search(uid)` → 返回用户数据（状态不变，只增加 observation）
 
-#### 4.6.5 Goal / Success Criterion
+#### 4.6.5 Goal
 
 按 `task_type` 区分：
 
@@ -201,28 +194,11 @@ agent 发出 Action(tool_name, params)
 
 #### 4.6.6 Reward Design
 
-**Outcome / Process 分割**：90% outcome + 10% shaping
-
-**Outcome（二元/连续）**：
+**Outcome**：
 - 分类任务：答案正确 = 1.0，错误 = 0.0
 - 生成任务：LLM judge 评分 ∈ [0, 1]
 
-**Process shaping（在 10% 预算内）**：
-
-| 维度 | 范围 | 信号 |
-|------|------|------|
-| `tool_chain_quality` | [0, 1] | 与 oracle_tool_chain 的编辑距离归一化 |
-| `efficiency` | [-1, 0] | 超出 oracle 长度的步数惩罚 |
-| `format_compliance` | {0, 1} | LLM 输出是否可解析为合法 Action JSON |
-| `hallucination_penalty` | [-1, 0] | 引用不存在的 uid/post_id 扣分 |
-| `redundancy_penalty` | [-1, 0] | 重复调用相同工具+相同参数扣分 |
-
-**Per-step credit**：触发首次有效工具调用（如首次 `user_search` 返回非空）的
-step 获得 milestone credit，用于 GRPO per-step advantage。
-
 #### 4.6.7 Task Synthesis（SandboxSpec 生成）
-
-三阶段流水线：
 
 **Stage 1 — Database Slicing**
 - 输入：完整 SoMe 数据库 + 一条标注查询
