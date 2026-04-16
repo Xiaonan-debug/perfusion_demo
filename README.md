@@ -106,168 +106,153 @@ Agent 工作流:
 真实标签: "true"
 ```
 
-### 4.6 本仓库中的 ASP 实现方式
+### 4.6 ASP 训练环境设计（SoMe）
 
-本仓库没有直接复用 SoMe 原始的静态评测管线，而是在 `datasets/some/` 下实现了一个
-**ASP-native 工具调用 sandbox**。它和原始 benchmark 的关系是：
+与 ALFWorld（物理操作）和 Mind2Web（网页交互）不同，SoMe 的核心能力是
+**工具链规划 + 信息检索**——agent 不改变世界状态，而是通过调用工具从只读数据库中
+提取信息，最终提交答案。
 
-- 原始 SoMe：完整 900 万帖子数据库、MCP 工具服务、单次静态评测
-- 本仓库实现：受 SoMe 启发的自包含工具调用环境，可交互、可生成、可训练
+#### 4.6.1 World State（隐藏状态）
 
-核心接口被重写成一个闭环：
-
-`query -> tool_list + agent_state -> agent tool_call -> sandbox tool_execution -> tool_response + reward -> next agent_state`
-
-和 ALFWorld（改变物理世界）、Mind2Web（改变网页状态）不同，SoMe 的世界是 **只读数据库**：
-agent 通过工具调用获取信息，但不改变世界本身。核心训练信号是 **工具链规划** 和 **长上下文推理**。
-
-#### 4.6.1 状态拆分
-
-实现里严格区分两层状态：
-
-- `world_state`
-  - 隐藏数据库切片（帖子、用户画像、知识库报告）
-  - 真实标签（ground truth）
-  - oracle tool chain（最优工具调用序列）
-  - 工具执行状态：已创建的 data_folder 及其内容
-- `agent_state`
-  - 暴露给 agent 的任务查询
-  - 可用工具列表及参数 schema
-  - 工具调用历史（tool_name + params + tool_response）
-  - 已创建的 data_folder 名称列表
-
-这样设计使得 agent 必须通过工具逐步获取信息，ground truth 完全隐藏在 world_state 中。
-
-#### 4.6.2 当前支持的任务类型
-
-8 种任务类型分为三类，和原始 SoMe 对齐：
-
-| 类别 | 任务 | answer_type | 评估方式 |
-|-----|------|-------------|---------|
-| 帖子中心 | RED, SES, MID | generation / 6-class | LLM judge / ACC |
-| 用户中心 | UBP, UEA, UCS | binary / 6-class | ACC |
-| 综合 | MCR, SMQ | binary / generation | ACC / LLM judge |
-
-统一动作空间为 9 种（8 个 SoMe 工具 + 终止动作）：
-
-- `search_post`
-- `search_topic`
-- `search_user`
-- `data_folder`
-- `retrieve_post`
-- `retrieve_knowledge`
-- `post_clustering`
-- `post_summarization`
-- `submit_answer`（终止动作）
-
-#### 4.6.3 数据生成和 Agent-as-a-Sandbox
-
-`task_generator.py` 负责为每个任务切出自包含的 database slice（几百到几千条帖子 + 相关用户），
-使得每个 `SandboxSpec` 可独立序列化、并行执行。`llm_task_agent.py` 可进一步用
-OpenRouter 做文案增强。为了让"环境生成"本身也能 agent 化，`agent_tools.py` 暴露了以下工具：
-
-- `slice_database` — 按任务类型从源数据切出子集
-- `inject_noise` — 控制噪声帖子比例调整难度
-- `annotate_oracle_chain` — 标注最优工具调用序列
-- `validate_solvability` — 执行 oracle chain 确认可解
-- `set_difficulty` — 设置 database_size / noise_ratio / max_steps
-- `finalize_spec` — 导出 `SandboxSpec`
-
-每个 SandboxSpec 必须附带 `oracle_tool_chain`，用于验证可解性和计算 step reward：
-
-```json
-{
-  "task_type": "UBP",
-  "oracle_tool_chain": [
-    {"tool": "search_user", "params": {"uid": "5288580817"}},
-    {"tool": "data_folder", "params": {"folder_name": "user_posts", "start_idx": 0, "end_idx": 50}},
-    {"tool": "submit_answer", "params": {"answer": "Yes"}}
-  ],
-  "oracle_steps": 3
+```python
+world_state = {
+    "database_slice": {
+        "posts": [...],          # 该任务相关的帖子子集（几百条）
+        "users": {...},          # uid -> profile + 历史帖子
+        "knowledge_base": [...]  # 外部知识条目（MID 任务用）
+    },
+    "ground_truth": "Yes",       # 正确答案（agent 不可见）
+    "oracle_tool_chain": [       # 参考工具调用序列
+        "user_search", "data_folder", "submit_answer"
+    ],
+    "task_type": "UBP",
+    "data_folders": {}           # 工具运行时产生的临时文件夹
 }
 ```
 
+关键：`database_slice` 是从 9M 帖子库中为该任务切出的**自包含子集**，
+包含解题所需的全部数据，不依赖外部数据库。
+
+#### 4.6.2 Observation Space（agent 可见）
+
+每步 agent 看到：
+
+- `query`：自然语言问题
+- `available_tools`：当前可调用的工具列表
+- `last_tool_result`：上一步工具返回的结果（帖子列表 / 用户画像 / 摘要等）
+- `history`：已调用的工具序列
+- `step_index` / `remaining_steps`
+
+agent 看不到 `ground_truth`、`oracle_tool_chain`、也无法直接读取 `database_slice`
+（必须通过工具间接查询）。
+
+#### 4.6.3 Action Space
+
+8 个 SoMe 工具 + 1 个终止动作：
+
+| Action | Payload | 功能 |
+|--------|---------|------|
+| `post_search` | `{location, start_time, end_time}` | 按地点/时间检索帖子 |
+| `user_search` | `{uid}` | 查询用户画像 + 历史帖子索引 |
+| `topic_search` | `{topic_name}` | 按话题检索帖子 |
+| `post_retrieve` | `{query, topk}` | 语义检索相关帖子 |
+| `topic_clustering` | `{folder_name}` | 对已检索帖子做聚类 |
+| `topic_summarization` | `{folder_name}` | 对聚类结果生成摘要 |
+| `knowledge_retrieve` | `{query, topk}` | 检索外部知识库 |
+| `data_folder` | `{folder_name, start_idx, end_idx}` | 分页读取临时数据 |
+| `submit_answer` | `{answer}` | 提交最终答案，结束 episode |
+
+参数缺失 → 返回错误提示 + 负奖励；对只读数据库执行查询，**不修改 world_state**
+（与 ALFWorld 的状态可变、Mind2Web 的表单可写形成对比）。
+
 #### 4.6.4 Transition Engine
 
-和 Mind2Web 的 metadata-driven transition 类似，SoMe 的 transition engine 是 **工具执行驱动** 的。
-每个工具调用查询 database_slice，更新 `data_folders` 状态，返回 `tool_response` 作为 observation。
+```
+agent 发出 Action(tool_name, params)
+  → sandbox 在 database_slice 上执行该工具
+  → 返回工具结果作为新 observation
+  → 若 tool_name == "submit_answer"：与 ground_truth 比对，episode 结束
+```
 
-关键区别：
+核心特征：
+- **只读**：工具执行不修改数据库，只产生查询结果
+- **确定性**：相同参数 → 相同结果（无随机性）
+- **中间存储**：`post_search` 等工具会将结果存入 `data_folders`，
+  后续 `topic_clustering` / `data_folder` 可引用
 
-| | ALFWorld | Mind2Web | SoMe |
-|---|----------|----------|------|
-| Transition 驱动 | 硬编码 Python | 元素 `on_click` 元数据 | 工具执行引擎 |
-| 世界变化 | 是（物体移动） | 是（表单/flag） | 否（数据库只读） |
-| 核心训练信号 | 空间推理 | DOM 理解 | 工具链规划 |
+与其他 benchmark 的对比：
+- ALFWorld：`take apple` → `apple.location = inventory`（状态可变）
+- Mind2Web：`TYPE "Boston"` → `form_values["destination"] = "Boston"`（状态可变）
+- SoMe：`user_search(uid)` → 返回用户数据（状态不变，只增加 observation）
 
-#### 4.6.5 Reward 设计
+#### 4.6.5 Goal / Success Criterion
 
-`datasets/some/reward.py` 按任务类别采用不同 reward，统一成 `RewardBreakdown` 格式：
+按 `task_type` 区分：
 
-**分类任务（MID, UBP, UEA, UCS, MCR）— 规则为主**：
+| 任务类别 | 答案类型 | 成功判定 |
+|---------|---------|---------|
+| UBP / MID / MCR | 分类（Yes/No/True/False） | `answer == ground_truth` |
+| UEA | 分类（情绪标签） | `answer == ground_truth` |
+| UCS | 分类（Yes/No） | `answer == ground_truth` |
+| RED / SES | 生成（摘要文本） | LLM-as-a-Judge 评分 |
+| SMQ | 生成（开放回答） | LLM-as-a-Judge 评分 |
+
+分类任务用精确匹配，生成任务用 LLM judge（预留接口，可替换为 ROUGE/BERTScore）。
+
+#### 4.6.6 Reward Design
+
+**Outcome / Process 分割**：90% outcome + 10% shaping
+
+**Outcome（二元/连续）**：
+- 分类任务：答案正确 = 1.0，错误 = 0.0
+- 生成任务：LLM judge 评分 ∈ [0, 1]
+
+**Process shaping（在 10% 预算内）**：
 
 | 维度 | 范围 | 信号 |
-|-----|------|------|
-| goal_completion | {0, 1} | 答案和 ground truth 精确匹配 |
-| tool_chain_quality | [0, 1] | oracle chain 覆盖率 |
-| efficiency | [-1, 0] | 步数 / max_steps |
-| format_compliance | {0, 1} | 输出可解析为有效工具调用 |
-| hallucination_penalty | [-1, 0] | 虚构工具响应或格式错误 |
+|------|------|------|
+| `tool_chain_quality` | [0, 1] | 与 oracle_tool_chain 的编辑距离归一化 |
+| `efficiency` | [-1, 0] | 超出 oracle 长度的步数惩罚 |
+| `format_compliance` | {0, 1} | LLM 输出是否可解析为合法 Action JSON |
+| `hallucination_penalty` | [-1, 0] | 引用不存在的 uid/post_id 扣分 |
+| `redundancy_penalty` | [-1, 0] | 重复调用相同工具+相同参数扣分 |
 
-**生成任务（RED, SES, SMQ）— 混合 rule + LLM-judge**：
+**Per-step credit**：触发首次有效工具调用（如首次 `user_search` 返回非空）的
+step 获得 milestone credit，用于 GRPO per-step advantage。
 
-| 维度 | 范围 | 信号 |
-|-----|------|------|
-| accuracy | 0-5 | LLM judge: 信息准确性 |
-| completeness | 0-5 | LLM judge: 关键信息覆盖度 |
-| relevance | 0-5 | LLM judge: 与查询相关性 |
-| goal_completion | [0, 1] | avg(scores) / 5 归一化 |
+#### 4.6.7 Task Synthesis（SandboxSpec 生成）
 
-聚合方式和 ALFWorld 一致：success 主导（90%），shaped terms 上限 10%。
+三阶段流水线：
 
-#### 4.6.6 Validation
+**Stage 1 — Database Slicing**
+- 输入：完整 SoMe 数据库 + 一条标注查询
+- 根据 oracle_tool_chain 追踪该查询涉及的 uid、post_id、topic
+- 收集所有被引用的帖子 + 用户 + 知识条目
+- 加入少量干扰项（同时间段/同地点的无关帖子）
+- 输出：自包含 `database_slice`（几百条记录，而非 9M）
 
-`datasets/some/validator.py` 当前会检查：
+**Stage 2 — Oracle Annotation**
+- 对每条查询记录解题所需的最短工具链
+- 标注预期中间结果（用于 milestone 检测）
 
-- schema 完整性（SandboxSpec 字段齐全、database_slice 非空）
-- solvability（oracle tool chain 可执行且答案正确）
-- non-triviality（随机工具调用不能解出）
-- database 一致性（tool 参数引用的 uid/topic 在 slice 中存在）
-- batch 内去重（query + database fingerprint 不重复）
+**Stage 3 — Difficulty Control**
+- Easy：oracle 链 ≤ 3 步，分类任务，单工具即可解答
+- Medium：oracle 链 4-6 步，需组合 2-3 个工具
+- Hard：oracle 链 > 6 步，需聚类/摘要，或 LLM judge 任务
 
-#### 4.6.7 建议新增模块
+每条 SandboxSpec 包含完整 `database_slice` + `query` + `ground_truth` +
+`oracle_tool_chain`，可独立运行。
 
-保留两个模块：`Tool-Chain Curriculum Scheduler` 和 `Tool Hallucination Detector`。
+#### 4.6.8 Validation
 
-1. **Tool-Chain Curriculum Scheduler（工具链课程调度）**
-   - 和 SOTOPIA 的 Curriculum Scheduler 同理，但调度维度为：task_type 混合比例、noise_ratio、database_size、max_steps
-   - 由 Scheduler Agent 根据 `answer_accuracy_mean`、`tool_chain_match_rate`、`hallucination_rate` 做小步调整
+| 检查项 | 通过条件 | 捕获问题 |
+|--------|---------|---------|
+| Schema 完整性 | 必填字段非空，database_slice 非空 | 残缺 spec |
+| 可解性 | Oracle policy 按 oracle_tool_chain 执行后得到正确答案 | 数据切片遗漏 |
+| 非平凡性 | 不调工具直接 submit 的正确率 < 30% | 猜测即可的任务 |
+| 数据库一致性 | oracle_tool_chain 引用的 uid/post_id 都存在于 slice 中 | 悬空引用 |
+| 去重 | 同 batch 内无重复 query + database 指纹 | 冗余 spec |
 
-2. **Tool Hallucination Detector（工具幻觉检测）**
-   - SoMe 论文明确指出的核心问题：agent 虚构工具响应或工具调用格式
-   - 重点检测：response hallucination（编造工具返回）、format hallucination（格式错误）、shortcut answering（不调工具直接答）、over-retrieval（反复同一工具消耗步数）
-   - 接入方式同 SOTOPIA Anti-Hacking：reward 聚合前调用，`risk_score > τ` 时施加惩罚
-
-#### 4.6.8 运行方式
-
-查看样例：
-
-```bash
-python -m datasets.some.demo --mode episode --task_type UBP
-```
-
-训练入口：
-
-```bash
-python -m datasets.some.train --model_name Qwen/Qwen3-8B
-```
-
-如果只想让任务生成阶段使用 OpenRouter：
-
-```bash
-python -m datasets.some.train \
-  --use_llm_task_generation \
-  --openrouter_model openai/gpt-5-mini
-```
+只有通过全部检查的 spec 进入训练池。
 
 ---
