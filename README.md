@@ -1,420 +1,271 @@
-## 5. InterCode - 交互式代码环境
+## 4. SoMe - 社交媒体平台
 
-### 5.1 概述
+### 4.1 概述
 
-**InterCode** 是 Princeton NLP 开发的交互式代码环境框架，支持多种编程领域（Bash、SQL、Python、CTF）。Agent 在 Docker 容器中执行代码，根据执行反馈进行多轮交互。
+**SoMe** (Social Media) 是一个评估 LLM Agent 在真实社交媒体场景中表现的 benchmark，发表于 AAAI 2026。涵盖帖子检测、用户行为预测、信息验证等任务。
 
 | 属性 | 值 |
 |------|-----|
-| 环境类型 | 5 种 (Bash, SQL, Python, CTF, SWE-Bench) |
-| 接口 | Gymnasium API |
-| 隔离方式 | Docker 容器 |
+| 帖子数量 | 9,164,284 |
+| 用户画像 | 6,591 |
+| 标注查询 | 17,869 |
+| 任务类型 | 8 种 |
 | 难度 | 中 |
 
-### 5.2 环境详情
+### 4.2 任务分类
 
-| 环境 | 数据来源 | 任务示例 |
-|-----|---------|---------|
-| Bash | NL2Bash | 文件系统操作、命令行任务 |
-| SQL | Spider | 数据库查询 |
-| Python | MBPP | 函数实现 |
-| CTF | picoCTF | 安全挑战、逆向工程 |
+| 类别 | 任务 | 描述 |
+|-----|------|------|
+| 帖子中心 | 实时事件检测 (RED) | 从流数据中检测新兴事件 |
+| 帖子中心 | 流事件摘要 (SES) | 对特定话题生成摘要 |
+| 帖子中心 | 虚假信息检测 (MID) | 判断声明的真实性 |
+| 用户中心 | 用户行为预测 (UBP) | 预测用户是否会点赞/评论/转发 |
+| 用户中心 | 用户情绪分析 (UEA) | 分析用户对帖子的情绪反应 |
+| 用户中心 | 用户评论模拟 (UCS) | 判断评论是否由特定用户撰写 |
+| 综合 | 内容推荐 (MCR) | 预测用户是否对内容感兴趣 |
+| 综合 | 社媒问答 (SMQ) | 回答关于社媒内容的问题 |
 
-### 5.3 数据格式
+### 4.3 工具（动作空间）
 
-**Bash 格式**:
+| 工具 | 功能 | 参数 |
+|-----|------|------|
+| `post_search` | 按地点/时间搜索帖子 | location, start_time, end_time |
+| `user_search` | 搜索用户画像和历史帖子 | uid |
+| `topic_search` | 搜索特定话题的帖子 | topic_name |
+| `post_retrieve` | 语义检索相关帖子 | query, topk |
+| `topic_clustering` | 聚类帖子 | folder_name |
+| `topic_summarization` | 生成聚类摘要 | folder_name |
+| `knowledge_retrieve` | 检索外部知识（用于辟谣） | query, topk |
+
+### 4.4 帖子数据格式（微博）
+
 ```json
 {
-  "query": "Count the number of files and directories in the testbed directory",
-  "gold": "find /testbed | wc -l"
+  "id": "5120482505917816",
+  "内容": "今天北京的天气真好，适合出去走走！",
+  "发布时间": "2024-03-15 10:30:00",
+  "发布地点": "北京",
+  "转发数": 156,
+  "评论数": 89,
+  "点赞数": 1024,
+  "图片数量": 2,
+  "来自": "iPhone 15 Pro"
 }
 ```
 
-**SQL 格式**:
-```json
+### 4.5 代表性样例
+
+**任务**: 用户行为预测 (UBP)
+
+```
+查询:
+请判断ID为5288580817的用户是否对以下帖子进行点赞：
 {
-  "db": "poker_player",
-  "query": "What are the names of poker players, ordered by final tables made?",
-  "gold": "SELECT T1.Name FROM people AS T1 JOIN poker_player AS T2 ON T1.People_ID = T2.People_ID ORDER BY T2.Final_Table_Made",
-  "hardness": "medium",
-  "db_tables": {
-    "poker_player": ["Poker_Player_ID", "People_ID", "Final_Table_Made", "Earnings"],
-    "people": ["People_ID", "Name", "Nationality", "Birth_Date"]
-  }
+  "id": "5120482505917816",
+  "内容": "分享一个超实用的Python技巧...",
+  "点赞数": 500
 }
+
+Agent 工作流:
+1. 调用 user_search(uid="5288580817") 获取用户画像
+   返回: {
+     "用户名": "Python爱好者",
+     "关注数": 200,
+     "粉丝数": 1500,
+     "简介": "程序员 | 技术分享",
+     "历史帖子": [...]
+   }
+
+2. 调用 data_folder 读取用户历史帖子（最多100条）
+   分析: 用户经常发布和互动技术类内容
+
+3. 比对目标帖子与用户兴趣
+   结论: 帖子是Python技术内容，符合用户兴趣
+
+输出: "是"
+真实标签: "是"
 ```
 
-**Python 格式**:
-```json
-{
-  "query": "Write a function to find similar elements from two tuple lists.",
-  "gold": "def similar_elements(test_tup1, test_tup2):\n  return tuple(set(test_tup1) & set(test_tup2))",
-  "tests": [
-    "assert similar_elements((3, 4, 5, 6),(5, 7, 4, 10)) == (4, 5)",
-    "assert similar_elements((1, 2, 3, 4),(5, 4, 3, 7)) == (3, 4)"
-  ]
-}
-```
-
-**CTF 格式**:
-```json
-{
-  "task_id": 0,
-  "query": "You have 'read' access to the file 'unpackme.flag.py' that contains the hidden flag",
-  "gold": "picoCTF{175_chr157m45_85f5d0ac}",
-  "tags": ["Reverse Engineering"]
-}
-```
-
-### 5.4 奖励计算
-
-| 环境 | 奖励计算方式 |
-|-----|------------|
-| Bash | 文件系统差异 (0.33) + 文件内容 MD5 (0.33) + 输出相似度 (0.33) |
-| SQL | IoU (结果集交集/并集) + 排序准确度 |
-| Python | 通过测试数 / 总测试数 |
-| CTF | 二元奖励：flag 正确=1.0，否则=0.0 |
-
-### 5.5 代表性样例
-
-**SQL 任务**:
+**任务**: 虚假信息检测 (MID)
 
 ```
-任务: "What is the average GNP and total population in nations
-      whose government is US territory?"
+查询:
+Please determine if the claim "Building a wall on the U.S.-Mexico border
+will take literally years." is true.
 
-数据库: world_1
+Agent 工作流:
+1. 调用 knowledge_retrieve(query="US Mexico border wall construction time", topk=10)
+   返回: [相关新闻报道、专家分析、政府文件...]
 
-交互:
-Turn 1:
-  Action: SELECT AVG(GNP), SUM(Population) FROM Country
-          WHERE GovernmentForm LIKE '%US territory%'
-  Observation: [(510.333333, Decimal('329000'))]
-  Reward: 1.0 ✓
+2. 分析检索到的事实:
+   - 边境墙全长约1,954英里
+   - 2017-2020年建设进度显示确实需要多年
+   - 专家估计完整建设需要10+年
+
+输出: "true"
+真实标签: "true"
 ```
 
-**CTF 任务 (逆向工程)**:
+### 4.6 本仓库中的 ASP 实现方式
 
-```
-任务: "You have 'read' access to 'unpackme.flag.py' containing the hidden flag"
+本仓库没有直接复用 SoMe 原始的静态评测管线，而是在 `datasets/some/` 下实现了一个
+**ASP-native 工具调用 sandbox**。它和原始 benchmark 的关系是：
 
-交互:
-Turn 1:
-  Action: cat unpackme.flag.py
-  Observation:
-    import base64
-    from cryptography.fernet import Fernet
-    key = b'VUovTmFxSnhOZ3dSSFlqRkFlJHM5OHlmPjxdK11TWG4='
-    cipher = Fernet(key)
-    payload = b'gAAAAABi...'
-    # (encrypted flag)
-
-Turn 2:
-  Action: pip3 install cryptography
-  Observation: Successfully installed cryptography-3.4.8
-
-Turn 3:
-  Action: python3 -c "from cryptography.fernet import Fernet;
-          key=b'VUovTmFxSnhOZ3dSSFlqRkFlJHM5OHlmPjxdK11TWG4=';
-          cipher=Fernet(key);
-          print(cipher.decrypt(b'gAAAAABi...').decode())"
-  Observation: picoCTF{175_chr157m45_85f5d0ac}
-
-Turn 4:
-  Action: submit picoCTF{175_chr157m45_85f5d0ac}
-  Reward: 1.0 ✓
-```
-
-### 5.6 本仓库中的 ASP 实现方式
-
-本仓库不直接调用 Docker 执行任意代码，而是实现一个
-`datasets/intercode/` 的 **ASP-native 代码交互 sandbox**。它和原始 benchmark 的关系是：
-
-- 原始 InterCode：真实 Docker 容器、真实代码执行、静态数据集（NL2Bash / Spider / MBPP / picoCTF）
-- 本仓库实现：受 InterCode 启发的**模拟代码执行环境**，可交互、可生成、可训练
+- 原始 SoMe：完整 900 万帖子数据库、MCP 工具服务、单次静态评测
+- 本仓库实现：受 SoMe 启发的自包含工具调用环境，可交互、可生成、可训练
 
 核心接口被重写成一个闭环：
 
-`task_instruction -> terminal_state -> agent code_action -> sandbox execution -> reward -> next terminal_state`
+`query -> tool_list + agent_state -> agent tool_call -> sandbox tool_execution -> tool_response + reward -> next agent_state`
 
-**为什么不直接跑 Docker？**
-GRPO 训练需要在每个 iteration 对 batch_size × group_size 条轨迹并行 rollout。如果每条轨迹都启动 Docker 容器执行任意代码，会带来三个问题：(1) 延迟——容器启动 + 代码执行的墙钟时间远大于模拟；(2) 安全——训练期间 agent 输出不可控，真实执行有安全风险；(3) 不可确定性——网络、文件系统竞态等导致不可复现。因此 ASP 的做法和 Mind2Web 一致：用 **受限模拟器** 替代真实执行，保留交互循环的结构，但把"执行"变成确定性的规则匹配。
+和 ALFWorld（改变物理世界）、Mind2Web（改变网页状态）不同，SoMe 的世界是 **只读数据库**：
+agent 通过工具调用获取信息，但不改变世界本身。核心训练信号是 **工具链规划** 和 **长上下文推理**。
 
-#### 5.6.1 状态拆分
+#### 4.6.1 状态拆分
 
 实现里严格区分两层状态：
 
-- `world_state`（隐藏）
-  - gold answer（ground truth 命令、查询、代码、或 flag）
-  - 完整环境快照：Bash 的文件系统树 / SQL 的表数据 / Python 的测试用例 / CTF 的文件内容
-  - 当前 step_index、执行历史、已提交标志、成功标志
-- `terminal_state`（暴露给 agent）
-  - 任务指令（自然语言）
-  - 上一次执行的 stdout / stderr
-  - 环境类型提示（如 "You are in a Bash terminal"）
-  - 步数和剩余步数
-  - 可选 metadata 提示：SQL 的表结构、Python 的函数签名要求、CTF 的文件名
+- `world_state`
+  - 隐藏数据库切片（帖子、用户画像、知识库报告）
+  - 真实标签（ground truth）
+  - oracle tool chain（最优工具调用序列）
+  - 工具执行状态：已创建的 data_folder 及其内容
+- `agent_state`
+  - 暴露给 agent 的任务查询
+  - 可用工具列表及参数 schema
+  - 工具调用历史（tool_name + params + tool_response）
+  - 已创建的 data_folder 名称列表
 
-这个拆分和 Mind2Web 的 `world_state` / `web_state` 完全对齐——agent 永远看不到 gold answer，只能通过交互获取反馈。
+这样设计使得 agent 必须通过工具逐步获取信息，ground truth 完全隐藏在 world_state 中。
 
-#### 5.6.2 当前支持的 sub-environment（4 种）
+#### 4.6.2 当前支持的任务类型
 
-| Sub-Env | 数据来源 | 动作含义 | 模拟方式 |
-|:---|:---|:---|:---|
-| `bash` | NL2Bash 风格 | Shell 命令 | 模拟文件系统 + 受限命令解释器 |
-| `sql` | Spider 风格 | SQL 查询 | sqlite3 in-memory（真实执行，确定性安全） |
-| `python` | MBPP 风格 | Python 函数 | ast.parse 语法检查 + 受限测试执行 |
-| `ctf` | picoCTF 风格 | Shell / Python | 模拟文件读取 + 已知库的确定性运算 |
+8 种任务类型分为三类，和原始 SoMe 对齐：
 
-统一动作空间为：
+| 类别 | 任务 | answer_type | 评估方式 |
+|-----|------|-------------|---------|
+| 帖子中心 | RED, SES, MID | generation / 6-class | LLM judge / ACC |
+| 用户中心 | UBP, UEA, UCS | binary / 6-class | ACC |
+| 综合 | MCR, SMQ | binary / generation | ACC / LLM judge |
 
-- `EXECUTE` — 提交代码/命令，返回执行结果
-- `SUBMIT` — 提交最终答案，触发 gold-answer 比对
-- `INSPECT` — 查看环境元信息（表结构 / 文件列表 / 函数签名等）
+统一动作空间为 9 种（8 个 SoMe 工具 + 终止动作）：
 
-**和 ALFWorld / Mind2Web 的关键区别**：ALFWorld 有 14 个离散动作名，Mind2Web 有 5 个，InterCode 只有 3 个动作类型，但 `EXECUTE` 的 payload 是 **开放文本**（任意代码字符串），不是从固定集合中选择。这意味着 transition engine 必须能处理任意输入。
+- `search_post`
+- `search_topic`
+- `search_user`
+- `data_folder`
+- `retrieve_post`
+- `retrieve_knowledge`
+- `post_clustering`
+- `post_summarization`
+- `submit_answer`（终止动作）
 
-#### 5.6.3 Transition Engine（代码执行模拟）
+#### 4.6.3 数据生成和 Agent-as-a-Sandbox
 
-与 Mind2Web 的 metadata-driven transition 思路一致，但落地方式因 sub-env 而异：
+`task_generator.py` 负责为每个任务切出自包含的 database slice（几百到几千条帖子 + 相关用户），
+使得每个 `SandboxSpec` 可独立序列化、并行执行。`llm_task_agent.py` 可进一步用
+OpenRouter 做文案增强。为了让"环境生成"本身也能 agent 化，`agent_tools.py` 暴露了以下工具：
 
-**SQL（最简单——可以真实执行）**：
-- 把 `task_config.db_schema` + `task_config.db_rows` 加载进 sqlite3 in-memory database
-- agent 提交的 SQL 直接在 sqlite3 上执行
-- 返回真实结果集或 sqlite3 的错误信息
-- SUBMIT 时用 IoU 比对结果集
+- `slice_database` — 按任务类型从源数据切出子集
+- `inject_noise` — 控制噪声帖子比例调整难度
+- `annotate_oracle_chain` — 标注最优工具调用序列
+- `validate_solvability` — 执行 oracle chain 确认可解
+- `set_difficulty` — 设置 database_size / noise_ratio / max_steps
+- `finalize_spec` — 导出 `SandboxSpec`
 
-这是 InterCode sandbox 中唯一可以做到"真实执行"的 sub-env，因为 sqlite3 是隔离的、确定性的、无副作用的。
-
-**Bash（模拟文件系统）**：
-- `task_config.filesystem` 是一个 `{path: content}` 字典，模拟目录树
-- transition engine 实现一组受限命令：`ls`, `cat`, `find`, `wc`, `grep`, `head`, `tail`, `echo`, `mv`, `cp`, `rm`, `mkdir`
-- 未识别的命令返回结构化的 `command not found` + 可用命令列表
-- SUBMIT 时比对文件系统最终状态 + 命令输出
-
-**Python（模拟测试）**：
-- agent 提交 Python 代码 → `ast.parse` 做语法检查
-- 如果语法正确，提取函数定义，逐个执行 `task_config.test_cases` 中的断言
-- 返回 pass/fail 结果列表
-- SUBMIT 时按 `passed_tests / total_tests` 计分
-
-**CTF（模拟文件 + 确定性运算）**：
-- `task_config.files` 定义可读文件的内容
-- agent 用 `cat` 读文件后看到加密代码
-- transition engine 可以模拟已知库（base64 decode、Fernet decrypt 等）的确定性运算
-- SUBMIT 时做 flag 字符串精确匹配
-
-#### 5.6.4 SandboxSpec 结构示例
-
-**SQL 任务**：
+每个 SandboxSpec 必须附带 `oracle_tool_chain`，用于验证可解性和计算 step reward：
 
 ```json
 {
-  "sandbox_type": "intercode",
-  "sandbox_id": "intercode-sql-00042",
-  "task_spec": {
-    "name": "Query average GNP for US territories",
-    "description": "What is the average GNP and total population in nations whose government is US territory?",
-    "max_steps": 10,
-    "metadata": {
-      "sub_env": "sql",
-      "difficulty": "medium",
-      "source_dataset": "spider",
-      "db_id": "world_1"
-    }
-  },
-  "initial_state": {
-    "task_config": {
-      "sub_env": "sql",
-      "instruction": "What is the average GNP and total population in nations whose government is US territory?",
-      "gold_answer": "SELECT AVG(GNP), SUM(Population) FROM Country WHERE GovernmentForm LIKE '%US territory%'",
-      "gold_result": [[510.333, 329000]],
-      "db_schema": {
-        "Country": ["Code", "Name", "Population", "GNP", "GovernmentForm"],
-        "City": ["ID", "Name", "CountryCode", "Population"]
-      },
-      "db_rows": {"Country": ["...rows..."], "City": ["...rows..."]}
-    },
-    "terminal_output": "",
-    "execution_history": [],
-    "submitted": false
-  },
-  "action_space": {"actions": ["EXECUTE", "SUBMIT", "INSPECT"]},
-  "observation_space": {"fields": ["instruction", "terminal_output", "sub_env", "step_index", "feedback"]}
+  "task_type": "UBP",
+  "oracle_tool_chain": [
+    {"tool": "search_user", "params": {"uid": "5288580817"}},
+    {"tool": "data_folder", "params": {"folder_name": "user_posts", "start_idx": 0, "end_idx": 50}},
+    {"tool": "submit_answer", "params": {"answer": "Yes"}}
+  ],
+  "oracle_steps": 3
 }
 ```
 
-**Bash 任务**：
+#### 4.6.4 Transition Engine
 
-```json
-{
-  "sandbox_type": "intercode",
-  "sandbox_id": "intercode-bash-00017",
-  "task_spec": {
-    "name": "Count files in testbed",
-    "description": "Count the number of files and directories in the testbed directory",
-    "max_steps": 8,
-    "metadata": {"sub_env": "bash", "difficulty": "easy"}
-  },
-  "initial_state": {
-    "task_config": {
-      "sub_env": "bash",
-      "instruction": "Count the number of files and directories in the testbed directory",
-      "gold_command": "find /testbed | wc -l",
-      "gold_output": "42",
-      "filesystem": {
-        "/testbed/file1.txt": "hello world",
-        "/testbed/dir1/": null,
-        "/testbed/dir1/script.py": "print('hi')"
-      }
-    },
-    "terminal_output": "$ ",
-    "execution_history": [],
-    "submitted": false
-  }
-}
-```
+和 Mind2Web 的 metadata-driven transition 类似，SoMe 的 transition engine 是 **工具执行驱动** 的。
+每个工具调用查询 database_slice，更新 `data_folders` 状态，返回 `tool_response` 作为 observation。
 
-#### 5.6.5 数据生成和 Agent-as-a-Sandbox
+关键区别：
 
-`task_generator.py` 负责程序化生成代码任务；`llm_task_agent.py` 可以进一步用
-OpenRouter 对指令和环境做 LLM 增强。为了让"环境生成"本身也能 agent 化，
-`agent_tools.py` 暴露以下工具：
+| | ALFWorld | Mind2Web | SoMe |
+|---|----------|----------|------|
+| Transition 驱动 | 硬编码 Python | 元素 `on_click` 元数据 | 工具执行引擎 |
+| 世界变化 | 是（物体移动） | 是（表单/flag） | 否（数据库只读） |
+| 核心训练信号 | 空间推理 | DOM 理解 | 工具链规划 |
 
-- `seed_template(sub_env, difficulty)` — 从模板库抽取基础任务骨架
-- `generate_db_schema(domain_hint)` — 生成 SQL 表结构和示例数据
-- `generate_filesystem(task_hint)` — 生成 Bash 文件系统快照
-- `generate_test_cases(function_spec)` — 为 Python 任务生成测试用例
-- `generate_ctf_challenge(category)` — 生成带加密/编码逻辑的 CTF 题目
-- `validate_with_oracle(spec)` — 用 gold answer 验证任务可解
-- `estimate_difficulty(spec)` — 估算任务难度
-- `finalize_spec(spec)` — 导出 `SandboxSpec`
+#### 4.6.5 Reward 设计
 
-因此这里不是只"加载 NL2Bash / Spider 数据"，而是可以持续出题、验题、导出 `SandboxSpec`。
+`datasets/some/reward.py` 按任务类别采用不同 reward，统一成 `RewardBreakdown` 格式：
 
-#### 5.6.6 Reward 设计
+**分类任务（MID, UBP, UEA, UCS, MCR）— 规则为主**：
 
-`datasets/intercode/reward.py` 采用 **per-sub-env 的混合 reward**：
+| 维度 | 范围 | 信号 |
+|-----|------|------|
+| goal_completion | {0, 1} | 答案和 ground truth 精确匹配 |
+| tool_chain_quality | [0, 1] | oracle chain 覆盖率 |
+| efficiency | [-1, 0] | 步数 / max_steps |
+| format_compliance | {0, 1} | 输出可解析为有效工具调用 |
+| hallucination_penalty | [-1, 0] | 虚构工具响应或格式错误 |
 
-- 规则奖励（episode 级，占 ~90%）
-  - **Bash**：`0.33 × fs_diff_score + 0.33 × output_similarity + 0.33 × md5_match`
-  - **SQL**：`IoU(result_set, gold_set)` + 排序准确度（对 ORDER BY 查询）
-  - **Python**：`passed_tests / total_tests`
-  - **CTF**：二元奖励（flag 正确 = 1.0，否则 = 0.0）
-- 过程奖励（step 级，占 ~10%）
-  - `progress`：中间执行结果逐步接近 gold（如 SQL 部分列匹配、Python 部分测试通过）
-  - `efficiency`：步数惩罚 `-step_index / max_steps`
-  - `action_quality`：语法错误 / 运行时错误惩罚
-  - `error_recovery`：在收到错误反馈后成功修正（正奖励）
-  - `format_compliance`：输出可解析为合法 JSON action
-  - `premature_submit`：无任何 EXECUTE 直接 SUBMIT 的惩罚
+**生成任务（RED, SES, SMQ）— 混合 rule + LLM-judge**：
 
-这个 reward 设计的核心洞察：InterCode 的训练价值不在于"一次写对代码"，而在于学会
-**"写 → 执行 → 看错误 → 修正 → 再执行"的交互式调试循环**。因此 `error_recovery`
-是唯一的正向过程奖励，而 `premature_submit` 是最重的过程惩罚。
+| 维度 | 范围 | 信号 |
+|-----|------|------|
+| accuracy | 0-5 | LLM judge: 信息准确性 |
+| completeness | 0-5 | LLM judge: 关键信息覆盖度 |
+| relevance | 0-5 | LLM judge: 与查询相关性 |
+| goal_completion | [0, 1] | avg(scores) / 5 归一化 |
 
-也就是说，当前默认版本是 **programmatic dense reward**，不依赖 LLM judge。
+聚合方式和 ALFWorld 一致：success 主导（90%），shaped terms 上限 10%。
 
-#### 5.6.7 Validation
+#### 4.6.6 Validation
 
-`datasets/intercode/validator.py` 当前会检查：
+`datasets/some/validator.py` 当前会检查：
 
-- schema 完整性（`task_config` 包含所有必要字段）
-- oracle 可解性（gold answer 在模拟环境中执行后得到满分 reward）
-- 非平凡性（随机 / 空 action 策略不能获得正 reward）
-- 难度校准（oracle 解法所需步数在 `[2, max_steps-2]` 范围内）
-- batch 内去重（基于 `(sub_env, instruction, gold_answer)` 指纹）
+- schema 完整性（SandboxSpec 字段齐全、database_slice 非空）
+- solvability（oracle tool chain 可执行且答案正确）
+- non-triviality（随机工具调用不能解出）
+- database 一致性（tool 参数引用的 uid/topic 在 slice 中存在）
+- batch 内去重（query + database fingerprint 不重复）
 
-这保证了生成的任务至少是"可解的、可训练的、不会整批塌缩成重复样本"。
+#### 4.6.7 建议新增模块
 
-#### 5.6.8 建议新增模块
+保留两个模块：`Tool-Chain Curriculum Scheduler` 和 `Tool Hallucination Detector`。
 
-1. **Curriculum Scheduler（课程调度）**
-   - 由 Scheduler Agent 通过 prompt 做课程调度
-   - 核心目标：根据 per-sub-env 的 success_rate 和 syntax_error_rate 动态调整 sub-env 混合比例和难度
+1. **Tool-Chain Curriculum Scheduler（工具链课程调度）**
+   - 和 SOTOPIA 的 Curriculum Scheduler 同理，但调度维度为：task_type 混合比例、noise_ratio、database_size、max_steps
+   - 由 Scheduler Agent 根据 `answer_accuracy_mean`、`tool_chain_match_rate`、`hallucination_rate` 做小步调整
 
-   **输入上下文**：
-   - 近 N 轮训练摘要：`success_rate_per_sub_env`、`avg_steps_to_solve`、`syntax_error_rate`、`format_error_rate`
-   - 当前课程配置：sub-env 混合比例、难度范围、max_steps
+2. **Tool Hallucination Detector（工具幻觉检测）**
+   - SoMe 论文明确指出的核心问题：agent 虚构工具响应或工具调用格式
+   - 重点检测：response hallucination（编造工具返回）、format hallucination（格式错误）、shortcut answering（不调工具直接答）、over-retrieval（反复同一工具消耗步数）
+   - 接入方式同 SOTOPIA Anti-Hacking：reward 聚合前调用，`risk_score > τ` 时施加惩罚
 
-   **输出**：
-   ```json
-   {
-     "difficulty_delta": 1,
-     "sub_env_mix": {"bash": 0.3, "sql": 0.3, "python": 0.3, "ctf": 0.1},
-     "max_steps": 8,
-     "focus_on_error_recovery": true
-   }
-   ```
-
-2. **Anti-Hacking Detector（奖励作弊检测）**
-   - 重点检测模式：
-     - **盲猜提交**：不执行任何代码，直接 SUBMIT 碰运气
-     - **模板刷分**：对所有任务提交同一固定命令
-     - **反馈忽视**：收到错误后重复提交相同代码
-     - **空转消耗**：执行大量 INSPECT / 无关命令，不推进任务
-
-   **建议输出**：
-   ```json
-   {
-     "hack_flags": ["blind_submit", "ignoring_feedback"],
-     "risk_score": 0.75,
-     "penalty": -1.0,
-     "invalidate": false,
-     "evidence": ["Agent submitted 3 times without any EXECUTE step"]
-   }
-   ```
-
-#### 5.6.9 推荐工作流（和 ASP 功能描述对齐）
-
-```text
-[1] Sandbox Agent 生成 task_config (instruction + gold + environment setup)
-    -> 做结构校验、oracle 可解性验证、难度标注、batch 去重
-
-[2] 对每个 task_config 构建 SandboxSpec
-    -> 包含 sub_env 类型、初始环境状态、模拟器配置
-
-[3] 训练模型在 InterCodeSandbox 中进行多轮代码交互
-    -> agent 提交 EXECUTE / INSPECT / SUBMIT
-    -> sandbox 返回 terminal_output + step reward
-    -> 记录 turn-level code/output/reward
-
-[4] Reward 模块打分
-    -> per-sub-env 的 gold-answer 比对 + dense shaping
-
-[5] 课程调度器根据训练信号调节下一批样本
-    -> sub-env 混合比例 / 难度范围 / max_steps
-```
-
-#### 5.6.10 实现时的关键约束（建议直接写成规则）
-
-- **安全性**：sandbox 不执行任意用户代码（SQL 例外：用 sqlite3 in-memory，天然隔离）
-- **Sub-env 独立性**：每个 sub-env 的 simulator 完全独立，新增 sub-env 只需实现 `Simulator` 接口
-- **Gold answer 必须可验证**：每个 `SandboxSpec` 的 gold answer 必须在 validator 中通过 oracle 执行
-- **评估可复现**：所有数据生成必须记录 `seed`
-- **奖励可解释**：reward 必须输出结构化分项，不做黑盒聚合
-- **错误反馈信息丰富**：stderr 应包含可操作的修正提示（如 "Column 'GNP' not found, available columns: Code, Name, Population"）
-
-#### 5.6.11 运行方式
+#### 4.6.8 运行方式
 
 查看样例：
 
 ```bash
-python -m datasets.intercode.demo --mode episode --sub_env sql
-python -m datasets.intercode.demo --mode episode --sub_env bash
-python -m datasets.intercode.demo --mode batch --sub_env python
+python -m datasets.some.demo --mode episode --task_type UBP
 ```
 
 训练入口：
 
 ```bash
-python -m datasets.intercode.train --model_name Qwen/Qwen3-8B
+python -m datasets.some.train --model_name Qwen/Qwen3-8B
 ```
 
 如果只想让任务生成阶段使用 OpenRouter：
 
 ```bash
-python -m datasets.intercode.train \
+python -m datasets.some.train \
   --use_llm_task_generation \
   --openrouter_model openai/gpt-5-mini
 ```
