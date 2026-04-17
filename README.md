@@ -108,127 +108,171 @@ Agent 工作流:
 
 ### 4.6 ASP 训练环境设计（SoMe）
 
-SoMe 的核心能力是
-**工具链规划 + 信息检索**, agent 不改变世界状态，而是通过调用工具从只读数据库中
-提取信息，最终提交答案。
+1. **Data Synthesis / Curation 层**：生成 persona、时间线、帖子语料、任务查询与 ground truth
+2. **LLM-backed Tool Server 层**：用冻结 LLM agent 做工具后端，模拟社媒平台的动态反馈
+3. **Reward / Judge 层**：规则指标 + 多维 LLM-as-a-Judge，支持过程级奖励
 
-#### 4.6.1 World State（隐藏状态）
+#### A. Spec 生成模块
 
-```python
-world_state = {
-    "database_slice": {
-        "posts": [...],          # 该任务相关的帖子子集（几百条）
-        "users": {...},          # uid -> profile + 历史帖子
-        "knowledge_base": [...]  # 外部知识条目（MID 任务用）
-    },
-    "ground_truth": "Yes",       # 正确答案（agent 不可见）
-    "oracle_tool_chain": [       # 参考工具调用序列
-        "user_search", "data_folder", "submit_answer"
-    ],
-    "task_type": "UBP",
-    "data_folders": {}           # 工具运行时产生的临时文件夹
+目标：每条 episode 合成一个自洽的"小型社媒世界"——一批用户、一段时间线、一批帖子、一道任务查询和带证据链的标准答案。
+
+**输入**：
+- 任务类型（RED / SES / MID / UBP / UEA / UCS / MCR / SMQ）
+- 难度参数（证据稀疏度、干扰帖子密度、persona 异质度、时间线深度）
+
+**参与的 Agent 角色**：
+
+| Agent | 职责 |
+|-------|------|
+| `Persona Agent` | 合成用户 profile：兴趣、写作风格、发帖节奏、关注关系 |
+| `Timeline Agent` | 围绕一个中心话题生成时间序列事件（新兴事件 / 持续话题 / 谣言扩散） |
+| `Post Generator Agent` | 按 persona + timeline 合成帖子正文、图片描述、互动计数 |
+| `Distractor Agent` | 注入主题不相关帖子、相似但错误的声明、重复噪声 |
+| `Query Agent` | 按任务类型生成测试查询（claim / user_id / topic / folder） |
+| `Label Oracle Agent` | 基于 world_state 给出标准答案与证据链 |
+
+**State 拆分（关键）**：
+- `world_state`（隐藏）：persona 的私密字段、timeline 的真实事件、每条帖子是否为 distractor、虚假信息的真相证据
+- `platform_state`（暴露）：工具调用能拿到的用户/帖子/话题视图、带噪声的 metadata、可见的互动计数
+
+**建议字段**：
+
+```json
+{
+  "episode_id": "some-000412",
+  "task_type": "MID",
+  "difficulty": {"distractor_density": 0.4, "evidence_sparsity": 0.6},
+  "world_state": {
+    "central_topic": "flight MH370 new debris found",
+    "ground_truth": "false",
+    "evidence_sources": ["news_ref_2024_03_11", "expert_analysis_12"],
+    "timeline": [{"t": "2024-03-10", "event": "rumor starts"}],
+    "personas": [{"uid": "u_001", "private_bias": "conspiracy"}],
+    "posts": [{"post_id": "p_001", "uid": "u_001", "is_distractor": false}]
+  },
+  "query": {
+    "prompt": "Please determine if the claim ... is true.",
+    "gold_label": "false",
+    "gold_evidence": ["news_ref_2024_03_11"]
+  }
 }
 ```
 
-关键：`database_slice` 是从 9M 帖子库中为该任务切出的**自包含子集**，
-包含解题所需的全部数据，不依赖外部数据库。
+**6 阶段 Validator**：
+1. Schema 完整性
+2. Persona 多样性去重
+3. 时间线因果一致性
+4. Oracle 可解性（Label Oracle 基于 world_state 能给出稳定答案）
+5. 非平凡性（naive baseline 不能直接命中，对应 SOTOPIA 的 `exploit_resistance`）
+6. 反记忆扰动（post_id / uid / topic_id 哈希化，避免 pretrain 数据泄漏）
 
-#### 4.6.2 Observation Space（agent 可见）
+#### B. LLM-backed Tool Server 模块
 
-每步 agent 看到：
+目标：不是"查一个静态索引",而是让工具后端动态、可控、可复现。每个工具背后都有冻结 LLM agent 或规则引擎,整条 episode 内工具绑定不变,避免轨迹中工具行为漂移。
 
-- `query`：自然语言问题
-- `available_tools`：当前可调用的工具列表
-- `last_tool_result`：上一步工具返回的结果（帖子列表 / 用户画像 / 摘要等）
-- `history`：已调用的工具序列
-- `step_index` / `remaining_steps`
+| 工具 | 后端 | 行为 |
+|------|------|------|
+| `post_search(location, time_range)` | 规则 + `Feed Synth Agent` | 从 world_state.posts 过滤,按时间/地点噪声重排 |
+| `user_search(uid)` | `User Profile Agent` | 渲染公开资料(隐藏 private_bias) |
+| `topic_search(topic)` | `Feed Synth Agent` | 合成带干扰的 topic feed |
+| `post_retrieve(query, topk)` | `Retrieval Agent`(LLM semantic ranker) | 对 world_state.posts 做语义排序 |
+| `topic_clustering(folder)` | `Clusterer Agent` | 对帖子生成聚类标签与分组 |
+| `topic_summarization(folder)` | `Summarizer Agent` | 生成摘要,会被 Faithfulness Judge 评估 |
+| `knowledge_retrieve(query, topk)` | `Knowledge Oracle Agent` | 从 world_state.evidence_sources 中检索真相片段 |
 
-agent 看不到 `ground_truth`、`oracle_tool_chain`、也无法直接读取 `database_slice`
-（必须通过工具间接查询）。
+**核心规则**：
+- 工具 agent **必须是冻结模型**,不能等于训练中模型,防止"工具-策略同步漂移"形成自证环
+- episode 创建阶段一次性抽样所有工具 agent,写入元数据,中途不更换
+- 所有工具输入输出记录在 `trajectory.tool_trace`,供 reward 与 anti-hacking 分析
+- 可按权重、能力标签、成本上限抽样
 
-#### 4.6.3 Action Space
+**建议元数据**：
 
-8 个 SoMe 工具 + 1 个终止动作：
-
-| Action | Payload | 功能 |
-|--------|---------|------|
-| `post_search` | `{location, start_time, end_time}` | 按地点/时间检索帖子 |
-| `user_search` | `{uid}` | 查询用户画像 + 历史帖子索引 |
-| `topic_search` | `{topic_name}` | 按话题检索帖子 |
-| `post_retrieve` | `{query, topk}` | 语义检索相关帖子 |
-| `topic_clustering` | `{folder_name}` | 对已检索帖子做聚类 |
-| `topic_summarization` | `{folder_name}` | 对聚类结果生成摘要 |
-| `knowledge_retrieve` | `{query, topk}` | 检索外部知识库 |
-| `data_folder` | `{folder_name, start_idx, end_idx}` | 分页读取临时数据 |
-| `submit_answer` | `{answer}` | 提交最终答案，结束 episode |
-
-对只读数据库执行查询
-
-#### 4.6.4 Transition Engine
-
+```json
+{
+  "episode_id": "some-000412",
+  "training_agent_model": "Qwen/Qwen3-8B",
+  "tool_agents": {
+    "retrieval": "openai/gpt-4o-mini",
+    "summarizer": "openai/gpt-4o-mini",
+    "knowledge_oracle": "openai/gpt-4.1"
+  },
+  "tool_binding_policy": "fixed_per_episode",
+  "seed": 20260415
+}
 ```
-agent 发出 Action(tool_name, params)
-  → sandbox 在 database_slice 上执行该工具
-  → 返回工具结果作为新 observation
-  → 若 tool_name == "submit_answer"：与 ground_truth 比对，episode 结束
+
+#### C. Reward / Judge 模块（对应 SOTOPIA 的 Reward / Judge）
+
+目标：不只给"答案对不对"的二元信号,而是对轨迹做可训练的细粒度奖励分解。
+
+建议 reward 结构：
+- `answer_correctness`：最终答案对比 gold_label（0-10）
+- `evidence_grounding`：引用的 post_id / evidence_source 是否真实存在（0-5）
+- `tool_use_efficiency`：工具调用数量 vs 最短可行路径的比值（0-5）
+- `faithfulness`：摘要/回答中是否出现 world_state 以外内容（-10 ~ 0）
+- `hallucination_penalty`：捏造不存在的用户/帖子/事实（-10 ~ 0）
+- `privacy_violation`：是否读取或泄露了 private_profile 字段（-10 ~ 0）
+- `reasoning_quality`：推理链与证据一致性（0-10）
+- `format_compliance`：结构化输出可解析性（0-1）
+
+混合奖励：
+- **Rule-based（硬约束）**：答案字符串比对、引用 id 存在性、工具调用格式、隐私红线
+- **LLM-as-a-Judge（软维度）**：Faithfulness / Reasoning / Hallucination / Privacy 独立 judge,多判打分再聚合
+
+建议 judge 输出：
+
+```json
+{
+  "scores": {
+    "answer_correctness": 8.0,
+    "evidence_grounding": 4.5,
+    "tool_use_efficiency": 3.0,
+    "faithfulness": 0.0,
+    "hallucination_penalty": -1.0,
+    "privacy_violation": 0.0,
+    "reasoning_quality": 7.2,
+    "format_compliance": 1.0
+  },
+  "rationale": "Agent reached correct conclusion with 2 valid evidence sources but cited one nonexistent post_id.",
+  "confidence": 0.84
+}
 ```
 
-与其他 benchmark 的对比：
-- ALFWorld：`take apple` → `apple.location = inventory`（状态可变）
-- Mind2Web：`TYPE "Boston"` → `form_values["destination"] = "Boston"`（状态可变）
-- SoMe：`user_search(uid)` → 返回用户数据（状态不变，只增加 observation）
+---
 
-#### 4.6.5 Goal
+#### E. 推荐工作流（和 ASP 功能描述对齐）
 
-按 `task_type` 区分：
+```text
+[1] Spec Agent 组生成 persona + timeline + posts + query + gold_label
+    -> 6 阶段 validator:schema / 多样性 / 因果 / oracle / 非平凡 / 反记忆
 
-| 任务类别 | 答案类型 | 成功判定 |
-|---------|---------|---------|
-| UBP / MID / MCR | 分类（Yes/No/True/False） | `answer == ground_truth` |
-| UEA | 分类（情绪标签） | `answer == ground_truth` |
-| UCS | 分类（Yes/No） | `answer == ground_truth` |
-| RED / SES | 生成（摘要文本） | LLM-as-a-Judge 评分 |
-| SMQ | 生成（开放回答） | LLM-as-a-Judge 评分 |
+[2] 从 tool-agent 池经 OpenRouter 抽样工具后端
+    -> 将 tool_agent_ids 与 seed 固定绑定到 episode
 
-分类任务用精确匹配，生成任务用 LLM judge（预留接口，可替换为 ROUGE/BERTScore）。
+[3] 训练 agent 通过工具接口与 sandbox 多轮交互
+    -> 记录 tool_trace / reasoning_chain / final_answer
 
-#### 4.6.6 Reward Design
+[4] Reward 模块打分
+    -> rule-based(答案 + 引用 id + 隐私) + multi-judge(faithfulness / reasoning / privacy)
 
-**Outcome**：
-- 分类任务：答案正确 = 1.0，错误 = 0.0
-- 生成任务：LLM judge 评分 ∈ [0, 1]
+[5] Anti-Hacking Detector 审核
+    -> hack_flags 与 risk_score,决定样本是否进入训练
 
-#### 4.6.7 Task Synthesis（SandboxSpec 生成）
+[6] Curriculum Scheduler 根据任务粒度指标调整下一批 spec 配置
+    -> 任务混合比 / 干扰密度 / 证据稀疏度 / 工具预算
+```
 
-**Stage 1 — Database Slicing**
-- 输入：完整 SoMe 数据库 + 一条标注查询
-- 根据 oracle_tool_chain 追踪该查询涉及的 uid、post_id、topic
-- 收集所有被引用的帖子 + 用户 + 知识条目
-- 加入少量干扰项（同时间段/同地点的无关帖子）
-- 输出：自包含 `database_slice`（几百条记录，而非 9M）
+---
 
-**Stage 2 — Oracle Annotation**
-- 对每条查询记录解题所需的最短工具链
-- 标注预期中间结果（用于 milestone 检测）
 
-**Stage 3 — Difficulty Control**
-- Easy：oracle 链 ≤ 3 步，分类任务，单工具即可解答
-- Medium：oracle 链 4-6 步，需组合 2-3 个工具
-- Hard：oracle 链 > 6 步，需聚类/摘要，或 LLM judge 任务
+#### G. Agent 在三大模块中的参与一览
 
-每条 SandboxSpec 包含完整 `database_slice` + `query` + `ground_truth` +
-`oracle_tool_chain`，可独立运行。
-
-#### 4.6.8 Validation
-
-| 检查项 | 通过条件 | 捕获问题 |
-|--------|---------|---------|
-| Schema 完整性 | 必填字段非空，database_slice 非空 | 残缺 spec |
-| 可解性 | Oracle policy 按 oracle_tool_chain 执行后得到正确答案 | 数据切片遗漏 |
-| 非平凡性 | 不调工具直接 submit 的正确率 < 30% | 猜测即可的任务 |
-| 数据库一致性 | oracle_tool_chain 引用的 uid/post_id 都存在于 slice 中 | 悬空引用 |
-| 去重 | 同 batch 内无重复 query + database 指纹 | 冗余 spec |
-
-只有通过全部检查的 spec 进入训练池。
+| 模块 | SOTOPIA | SoMe |
+|------|---------|------|
+| Spec 生成 | Profile + Scenario Agent | Persona / Timeline / Post Generator / Distractor / Query / Label Oracle |
+| 环境交互 | 对手模型池(固定绑定) | Feed Synth / User Profile / Retrieval / Clusterer / Summarizer / Knowledge Oracle(固定绑定) |
+| Reward / Judge | Rule + 多维 LLM Judge | Rule(答案 + 引用 + 隐私) + Faithfulness / Reasoning / Hallucination / Privacy Judges |
+| 课程 / 反作弊 | Scheduler + Detector Agent | Scheduler + Detector Agent(新增 SoMe 特有作弊模式) |
 
 ---
